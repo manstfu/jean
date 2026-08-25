@@ -108,6 +108,11 @@ All user actions flow through a centralized command system:
 
 This decouples UI triggers from implementations and enables consistent behavior.
 
+Native startup plumbing is an exception for narrow internal reads: call a
+small shared core helper directly instead of constructing the full async
+WebSocket dispatcher future on Tauri's main stack. The dispatcher is intentionally
+large and can overflow the startup stack as command arms grow.
+
 ## System Architecture
 
 ### Core Systems
@@ -167,6 +172,13 @@ Additional systems (no dedicated docs yet):
   waiting state. The backing Jean `sessionId` must therefore be carried through
   terminal creation, native-session reconnect, frontend terminal persistence,
   `start_terminal`, and both native/WebSocket transports.
+
+  **Claude terminal attention.** Native Claude sessions receive a session-scoped
+  `Stop` and `StopFailure` command hook through the CLI's JSON `--settings`
+  argument. The hook appends its lifecycle payload to the same per-session
+  notification file, so Claude turn completion reaches the shared
+  `terminal:attention`/AutoPilot boundary without scraping rendered terminal
+  output or changing the user's project settings.
 
   **Web-mode persistence.** In web access (Axum HTTP server + WebSocket),
   panel/side/drawer and modal terminals survive a full browser refresh. Three
@@ -499,6 +511,41 @@ The embedded Axum HTTP server enables running Jean without the native window:
 - Serves the bundled frontend via `ServeDir`
 - WebSocket provides real-time event streaming (mirrors Tauri's `emit`/`listen` pattern)
 - Bearer token authentication; configurable port; localhost-only by default
+
+### Autopilot mission orchestration
+
+Autopilot is a user-started mission controller, separate from Mr. Robot's
+`auto_fix` scheduler. Mission state, tasks, Director decisions, grill
+checkpoints, and append-only events live under the app-data `autopilot/` store;
+the frontend reads them through TanStack Query and receives `autopilot:updated`
+events for invalidation.
+
+The Worker executes one bounded task through the exact session that owns the
+floating AutoPilot robot. Jean Chat Workers use the persisted queue; native
+Claude/Codex/OpenCode/Kimi sessions receive the next prompt through their
+existing Jean-managed terminal handle. The robot never creates a replacement
+Jean Chat session or a second visible terminal.
+Native multiline prompts are sent as bracketed-paste input followed by a
+separate Enter event so TUIs such as Claude Code commit the paste before
+submitting it.
+
+The floating robot collects the mission and the headless Director backend/model
+for that session. The Director creates a persisted grill checkpoint and queues
+the next bounded message. It has no shell or file-edit tools; it may only
+produce a typed next action, recommendation, and evidence. The controller
+validates that action against mission policy before creating another task. A
+Worker stop summaries include a small handoff contract: the Worker reports its
+status, an optional `SUGGESTED_NEXT_TASK`, and whether it believes the mission
+is complete. The Director treats that suggestion as input, pressure-tests it,
+adds the required premortem or verification, and returns one refined bounded
+instruction. A normal task stop therefore causes the loop to continue; a first
+failure becomes a debug task, while repeated failures or a product decision
+create a human checkpoint. Completion requires the Worker completion marker,
+acceptance evidence, and a policy-approved Director `mark_complete` decision.
+Codex native terminals provide the turn-complete signal, and Claude native
+terminals use a session-scoped `Stop`/`StopFailure` hook injected through CLI
+settings. OpenCode still needs an equivalent lifecycle signal before its
+native loop can run fully unattended.
 
 ## Development Workflow
 

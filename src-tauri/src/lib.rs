@@ -184,21 +184,16 @@ fn initialize_core(app: &mut tauri::App) -> Result<jean_core::RuntimeContext, St
 }
 
 fn allow_project_assets(app: &AppHandle, core: &jean_core::RuntimeContext) {
-    let projects =
-        tauri::async_runtime::block_on(jean_core::http_server::dispatch::dispatch_command(
-            core,
-            "list_projects",
-            Value::Object(Default::default()),
-        ));
-    let Ok(Value::Array(projects)) = projects else {
+    // Do not route this internal startup read through the giant WebSocket
+    // dispatcher. Constructing that async match future on Tauri's main stack
+    // can overflow as command arms are added. The direct command has the same
+    // project-loading semantics and keeps startup stack usage bounded.
+    let paths = tauri::async_runtime::block_on(jean_core::list_project_asset_paths(core.clone()));
+    let Ok(paths) = paths else {
         return;
     };
-    for project in projects {
-        for key in ["path", "worktrees_dir"] {
-            if let Some(path) = project.get(key).and_then(Value::as_str) {
-                let _ = app.asset_protocol_scope().allow_directory(path, true);
-            }
-        }
+    for path in paths {
+        let _ = app.asset_protocol_scope().allow_directory(path, true);
     }
     if let Some(home) = dirs::home_dir() {
         let _ = app

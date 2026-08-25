@@ -1462,6 +1462,17 @@ pub fn execute_one_shot_kimi(
     json_schema: Option<&str>,
     working_dir: Option<&Path>,
 ) -> Result<String, String> {
+    execute_one_shot_kimi_with_mode(app, prompt, model, json_schema, working_dir, "plan")
+}
+
+pub fn execute_one_shot_kimi_with_mode(
+    app: &AppHandle,
+    prompt: &str,
+    model: &str,
+    json_schema: Option<&str>,
+    working_dir: Option<&Path>,
+    execution_mode: &str,
+) -> Result<String, String> {
     let cli_path = crate::kimi_cli::resolve_cli_binary(app);
     if !crate::kimi_cli::binary_exists(&cli_path) {
         return Err("Kimi Code CLI not installed".to_string());
@@ -1475,6 +1486,13 @@ pub fn execute_one_shot_kimi(
     let dir = working_dir.unwrap_or_else(|| Path::new("."));
     let mut command = crate::platform::cli_command(&cli_path.to_string_lossy(), Some(dir));
     command.args(["-p", &prompt]);
+    if execution_mode == "yolo" {
+        command.arg("--yolo");
+    } else if !matches!(execution_mode, "plan" | "build") {
+        return Err(format!(
+            "Unsupported Kimi Worker execution mode: {execution_mode}"
+        ));
+    }
     if let Some(model) = kimi_model(Some(model)) {
         command.args(["--model", model]);
     }

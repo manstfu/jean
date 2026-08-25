@@ -39,6 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod agent_browser;
 mod antigravity_cli;
 mod auto_fix;
+mod autopilot;
 mod background_tasks;
 mod chat;
 mod claude_cli;
@@ -75,6 +76,22 @@ pub use version::{app_version, set_app_version};
 pub use chat::open_file_in_default_app;
 pub use platform::open_url_in_browser;
 pub use projects::open_worktree_in_editor;
+
+/// Return project directories that need to be allowed by the native asset
+/// protocol during desktop startup. This narrow helper avoids constructing the
+/// full HTTP/WebSocket command dispatcher future for an internal read.
+pub async fn list_project_asset_paths(app: RuntimeContext) -> Result<Vec<String>, String> {
+    let projects = projects::list_projects(app).await?;
+    Ok(projects
+        .into_iter()
+        .flat_map(|project| {
+            [Some(project.path), project.worktrees_dir]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        })
+        .collect())
+}
 
 // Validation functions
 fn validate_filename(filename: &str) -> Result<(), String> {
@@ -322,6 +339,17 @@ pub struct AppPreferences {
     pub default_execution_mode: String, // Default execution mode: "plan", "build", or "yolo"
     #[serde(default = "default_backend")]
     pub default_backend: String, // Default CLI backend: "claude", "codex", "opencode", "cursor", "pi", or "commandcode"
+    #[serde(default = "default_autopilot_director_backend")]
+    pub autopilot_director_backend: String, // Legacy fallback for older missions
+    #[serde(default = "default_autopilot_director_model")]
+    pub autopilot_director_model: String, // Legacy fallback for older missions
+    #[serde(default)]
+    pub autopilot_director_provider: Option<String>, // Legacy Director provider/profile
+    #[serde(default)]
+    pub autopilot_director_effort: Option<String>, // Legacy Director reasoning/effort
+    #[serde(default = "default_autopilot_worker_models")]
+    pub autopilot_worker_models: std::collections::HashMap<String, String>,
+    // Legacy per-provider Worker defaults; new missions inherit their session.
     #[serde(default = "default_new_session_kind")]
     pub default_new_session_kind: String, // Default new session action: "chat", "terminal", or a CLI backend
     #[serde(default = "default_codex_model")]
@@ -700,6 +728,14 @@ fn default_backend() -> String {
     "claude".to_string()
 }
 
+fn default_autopilot_director_backend() -> String {
+    "codex".to_string()
+}
+
+fn default_autopilot_director_model() -> String {
+    "gpt-5.4-mini".to_string()
+}
+
 fn default_new_session_kind() -> String {
     "chat".to_string()
 }
@@ -805,6 +841,21 @@ fn default_kimi_model() -> String {
 
 fn default_antigravity_model() -> String {
     "antigravity/auto".to_string()
+}
+
+fn default_autopilot_worker_models() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([
+        // The Worker is intentionally cheaper than the default interactive
+        // Codex model; users can override this in Autopilot settings.
+        ("claude".to_string(), "haiku".to_string()),
+        ("codex".to_string(), "gpt-5.4-mini".to_string()),
+        ("opencode".to_string(), default_opencode_model()),
+        ("cursor".to_string(), default_cursor_model()),
+        ("pi".to_string(), default_pi_model()),
+        ("commandcode".to_string(), default_commandcode_model()),
+        ("grok".to_string(), default_grok_model()),
+        ("kimi".to_string(), default_kimi_model()),
+    ])
 }
 
 fn default_grok_cli_source() -> String {
@@ -951,6 +1002,20 @@ mod tests {
 
         assert!(prefs.parallel_execution_prompt_enabled);
         assert!(prefs.codex_multi_agent_enabled);
+    }
+
+    #[test]
+    fn autopilot_worker_defaults_use_cheap_claude_and_codex_models() {
+        let prefs = AppPreferences::default();
+
+        assert_eq!(
+            super::autopilot_worker_model_for_backend(&prefs, "claude"),
+            "haiku"
+        );
+        assert_eq!(
+            super::autopilot_worker_model_for_backend(&prefs, "codex"),
+            "gpt-5.4-mini"
+        );
     }
 
     #[test]
@@ -2614,6 +2679,26 @@ fn selected_model_for_backend(preferences: &AppPreferences, backend: &str) -> St
     }
 }
 
+pub(crate) fn autopilot_worker_model_for_backend(
+    preferences: &AppPreferences,
+    backend: &str,
+) -> String {
+    preferences
+        .autopilot_worker_models
+        .get(backend)
+        .filter(|model| !model.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            if backend == "claude" {
+                // Older preferences did not have the per-Worker map. Claude
+                // Autopilot should still default to its inexpensive alias.
+                "haiku".to_string()
+            } else {
+                selected_model_for_backend(preferences, backend)
+            }
+        })
+}
+
 fn migrate_final_review_preferences(
     preferences: &mut AppPreferences,
     raw_preferences: &Value,
@@ -2827,6 +2912,11 @@ impl Default for AppPreferences {
             confirm_session_close: default_confirm_session_close(),
             default_execution_mode: default_execution_mode(),
             default_backend: default_backend(),
+            autopilot_director_backend: default_autopilot_director_backend(),
+            autopilot_director_model: default_autopilot_director_model(),
+            autopilot_director_provider: None,
+            autopilot_director_effort: None,
+            autopilot_worker_models: default_autopilot_worker_models(),
             default_new_session_kind: default_new_session_kind(),
             selected_codex_model: default_codex_model(),
             selected_opencode_model: default_opencode_model(),
@@ -4484,6 +4574,7 @@ pub fn initialize_runtime(context: &RuntimeContext) -> Result<(), String> {
     let task_manager = background_tasks::BackgroundTaskManager::new(context.clone());
     task_manager.start();
     context.manage(task_manager);
+    autopilot::install_event_handlers(context);
     auto_fix::scheduler::start_auto_fix_scheduler(context.clone());
 
     let cleanup_context = context.clone();

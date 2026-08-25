@@ -58,7 +58,7 @@ pub async fn start_terminal(
     let (command_args, signal) = match (command.as_deref(), session_id.as_deref()) {
         (Some(command), Some(session_id)) => {
             let had_args = command_args.is_some();
-            let (args, signal) = super::attention::inject_codex_notify(
+            let (args, signal) = super::attention::inject_lifecycle_notifications(
                 &app,
                 session_id,
                 command,

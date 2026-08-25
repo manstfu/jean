@@ -167,6 +167,11 @@ const NewSessionModeModal = lazy(() =>
     default: mod.NewSessionModeModal,
   }))
 )
+const AutopilotCheckpointDialog = lazy(() =>
+  import('@/components/autopilot/AutopilotCheckpointDialog').then(mod => ({
+    default: mod.AutopilotCheckpointDialog,
+  }))
+)
 const CloseWorktreeDialog = lazy(() =>
   import('@/components/chat/CloseWorktreeDialog').then(mod => ({
     default: mod.CloseWorktreeDialog,
@@ -521,6 +526,7 @@ export function MainWindow() {
   const shouldRenderNewSessionModeModal = useRetainedMount(
     newSessionModeTarget !== null
   )
+  const shouldRenderAutopilotCheckpointDialog = true
 
   // On Windows, use smaller border radius and remove it when maximized
   // On other platforms, use rounded-xl only in native app mode
@@ -778,6 +784,11 @@ export function MainWindow() {
       {shouldRenderNewSessionModeModal && (
         <Suspense fallback={null}>
           <NewSessionModeModal />
+        </Suspense>
+      )}
+      {shouldRenderAutopilotCheckpointDialog && (
+        <Suspense fallback={null}>
+          <AutopilotCheckpointDialog />
         </Suspense>
       )}
       {shouldRenderAddProjectDialog && (

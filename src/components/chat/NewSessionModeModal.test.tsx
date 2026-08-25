@@ -233,6 +233,18 @@ describe('NewSessionModeModal', () => {
     )
   })
 
+  it('keeps AutoPilot out of the New session picker', () => {
+    useUIStore.getState().openNewSessionModeModal({
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree-1',
+      origin: 'chat',
+    })
+
+    render(<NewSessionModeModal />)
+
+    expect(screen.queryByText(/autopilot/i)).not.toBeInTheDocument()
+  })
+
   it('auto-opens the default Jean chat session without showing the picker', async () => {
     mutate.mockImplementation(
       (

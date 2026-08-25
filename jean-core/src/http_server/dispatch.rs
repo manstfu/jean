@@ -3761,6 +3761,89 @@ pub async fn dispatch_command(
         "is_wsl_available" => to_value(crate::is_wsl_available()),
 
         // =====================================================================
+        // Autopilot missions
+        // =====================================================================
+        "start_autopilot_mission" => {
+            let request: crate::autopilot::types::StartAutopilotMissionRequest =
+                serde_json::from_value(args)
+                    .map_err(|error| format!("Invalid Autopilot mission request: {error}"))?;
+            let result = crate::autopilot::start_autopilot_mission(app.clone(), request).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "start_autopilot_worker" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result = crate::autopilot::launch_autopilot_worker(app.clone(), mission_id).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "run_autopilot_director" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result = crate::autopilot::run_autopilot_director(app.clone(), mission_id).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "get_autopilot_mission" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result = crate::autopilot::get_autopilot_mission(app.clone(), mission_id).await?;
+            to_value(result)
+        }
+        "list_autopilot_missions" => {
+            let result = crate::autopilot::list_autopilot_missions(app.clone()).await?;
+            to_value(result)
+        }
+        "get_autopilot_mission_events" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result =
+                crate::autopilot::get_autopilot_mission_events(app.clone(), mission_id).await?;
+            to_value(result)
+        }
+        "pause_autopilot_mission" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result = crate::autopilot::pause_autopilot_mission(app.clone(), mission_id).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "resume_autopilot_mission" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result =
+                crate::autopilot::resume_autopilot_mission(app.clone(), mission_id).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "stop_autopilot_mission" => {
+            let mission_id: String = field(&args, "missionId", "mission_id")?;
+            let result = crate::autopilot::stop_autopilot_mission(app.clone(), mission_id).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "update_autopilot_policy" => {
+            let request: crate::autopilot::types::UpdateAutopilotPolicyRequest =
+                serde_json::from_value(args)
+                    .map_err(|error| format!("Invalid Autopilot policy request: {error}"))?;
+            let result = crate::autopilot::update_autopilot_policy(app.clone(), request).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "record_autopilot_worker_stopped" => {
+            let request: crate::autopilot::types::RecordWorkerStoppedRequest =
+                serde_json::from_value(args)
+                    .map_err(|error| format!("Invalid Autopilot Worker boundary: {error}"))?;
+            let result =
+                crate::autopilot::record_autopilot_worker_stopped(app.clone(), request).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+        "respond_autopilot_approval" => {
+            let request: crate::autopilot::types::RespondAutopilotApprovalRequest =
+                serde_json::from_value(args)
+                    .map_err(|error| format!("Invalid Autopilot approval: {error}"))?;
+            let result = crate::autopilot::respond_autopilot_approval(app.clone(), request).await?;
+            emit_cache_invalidation(app, &["autopilot-missions"]);
+            to_value(result)
+        }
+
+        // =====================================================================
         // Opinionated plugin commands
         // =====================================================================
         "check_opinionated_plugin_status" => {

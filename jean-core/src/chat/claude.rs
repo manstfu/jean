@@ -2574,6 +2574,228 @@ pub fn tail_claude_output(
     })
 }
 
+/// Execute a headless Claude structured-output call for the Autopilot Director.
+///
+/// This deliberately uses plan mode and an empty tool allowlist. The Director
+/// receives a bounded observation in its prompt and must not edit the Worker
+/// worktree or operate arbitrary tools.
+pub fn execute_one_shot_claude_read_only(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    output_schema: &str,
+) -> Result<String, String> {
+    let cli_path = crate::claude_cli::resolve_cli_binary(app);
+    if !crate::platform::resolved_cli_exists(&cli_path) {
+        return Err("Claude CLI not installed".to_string());
+    }
+
+    let mut command = crate::platform::cli_command(&cli_path.to_string_lossy(), None);
+    command.args([
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--tools",
+        "",
+        "--model",
+        model,
+        "--no-session-persistence",
+        "--max-turns",
+        "2",
+        "--json-schema",
+        output_schema,
+        "--permission-mode",
+        "plan",
+    ]);
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to spawn Claude Director: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let input_message = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": prompt,
+            }
+        });
+        writeln!(stdin, "{input_message}")
+            .map_err(|error| format!("Failed to write Claude Director prompt: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to wait for Claude Director: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Claude Director failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    extract_claude_structured_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Execute one bounded, write-capable Claude CLI task for a native Autopilot
+/// Worker. This uses Claude's structured stream protocol directly; it does
+/// not create or enqueue a Jean Chat message.
+pub fn execute_one_shot_claude_worker(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    output_schema: &str,
+    working_dir: &std::path::Path,
+    execution_mode: &str,
+) -> Result<String, String> {
+    let cli_path = crate::claude_cli::resolve_cli_binary(app);
+    if !crate::platform::resolved_cli_exists(&cli_path) {
+        return Err("Claude CLI not installed".to_string());
+    }
+    let permission_mode = match execution_mode {
+        "plan" => "plan",
+        "build" => "acceptEdits",
+        "yolo" => "bypassPermissions",
+        mode => return Err(format!("Unsupported Claude Worker execution mode: {mode}")),
+    };
+
+    let mut command = crate::platform::cli_command(&cli_path.to_string_lossy(), Some(working_dir));
+    command.args([
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--model",
+        model,
+        "--no-session-persistence",
+        "--max-turns",
+        "50",
+        "--json-schema",
+        output_schema,
+        "--permission-mode",
+        permission_mode,
+    ]);
+    command
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to spawn Claude Worker: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let input_message = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": prompt,
+            }
+        });
+        writeln!(stdin, "{input_message}")
+            .map_err(|error| format!("Failed to write Claude Worker prompt: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to wait for Claude Worker: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Claude Worker failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    extract_claude_structured_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn extract_claude_structured_output(output: &str) -> Result<String, String> {
+    let mut text_content = String::new();
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let parsed: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        if parsed.get("type").and_then(|value| value.as_str()) == Some("assistant") {
+            if let Some(content) = parsed
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(|content| content.as_array())
+            {
+                for block in content {
+                    if block.get("type").and_then(|value| value.as_str()) == Some("tool_use")
+                        && block.get("name").and_then(|value| value.as_str())
+                            == Some("StructuredOutput")
+                    {
+                        if let Some(input) = block.get("input") {
+                            return Ok(input.to_string());
+                        }
+                    }
+                    if block.get("type").and_then(|value| value.as_str()) == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|value| value.as_str()) {
+                            text_content.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        if parsed.get("type").and_then(|value| value.as_str()) == Some("result") {
+            if let Some(result) = parsed.get("result") {
+                if result.is_object() {
+                    return Ok(result.to_string());
+                }
+                if text_content.is_empty() {
+                    if let Some(result_text) = result.as_str() {
+                        text_content.push_str(result_text);
+                    }
+                }
+            }
+        }
+    }
+
+    let trimmed = text_content.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if value.is_object() {
+            return Ok(value.to_string());
+        }
+    }
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim()
+        .strip_suffix("```")
+        .unwrap_or(trimmed)
+        .trim();
+    if serde_json::from_str::<serde_json::Value>(stripped)
+        .map(|value| value.is_object())
+        .unwrap_or(false)
+    {
+        return Ok(stripped.to_string());
+    }
+
+    Err("Claude CLI returned no structured JSON object".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2779,5 +3001,15 @@ mod tests {
         assert!(args.contains(&"mcp__jean-dev__*".to_string()));
         assert!(args.contains(&"mcp__github".to_string()));
         assert!(args.contains(&"mcp__github__*".to_string()));
+    }
+
+    #[test]
+    fn extracts_director_structured_output_from_tool_use() {
+        let output = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{"action":"ask_human_question","question":"Keep scope?","recommended_answer":"Keep scope","requires_human":true}}]}}"#;
+
+        let extracted = extract_claude_structured_output(output).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(value["action"], "ask_human_question");
+        assert_eq!(value["requires_human"], true);
     }
 }

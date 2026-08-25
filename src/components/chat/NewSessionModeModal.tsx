@@ -311,11 +311,26 @@ export function NewSessionModeModal() {
       return
     }
 
+    // Older preferences could persist the removed picker mode. Treat it as
+    // the normal session entry point; AutoPilot now belongs to an open session.
+    if (defaultKind === 'autopilot') {
+      chooseChat()
+      return
+    }
+
     setNativePickerInitialCommandArgs([])
     setNativePickerKind(defaultKind)
   }, [chooseChat, preferences?.default_new_session_kind, target])
 
   const onNewSessionKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.target instanceof HTMLElement &&
+      (event.target.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName))
+    ) {
+      return
+    }
+
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
       return
     }

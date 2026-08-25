@@ -4971,6 +4971,49 @@ pub fn execute_one_shot_codex(
     working_dir: Option<&std::path::Path>,
     reasoning_effort: Option<&str>,
 ) -> Result<String, String> {
+    execute_one_shot_codex_with_sandbox(
+        app,
+        prompt,
+        model,
+        output_schema,
+        working_dir,
+        reasoning_effort,
+        "workspace-write",
+    )
+}
+
+/// Execute a structured Codex call without granting the Director write access.
+///
+/// Autopilot's Director receives a bounded mission observation and must never
+/// mutate the Worker worktree. Keep this separate from the existing magic
+/// prompt helper, whose callers intentionally use workspace-write sandboxing.
+pub fn execute_one_shot_codex_read_only(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    output_schema: &str,
+    reasoning_effort: Option<&str>,
+) -> Result<String, String> {
+    execute_one_shot_codex_with_sandbox(
+        app,
+        prompt,
+        model,
+        output_schema,
+        None,
+        reasoning_effort,
+        "read-only",
+    )
+}
+
+fn execute_one_shot_codex_with_sandbox(
+    app: &tauri::AppHandle,
+    prompt: &str,
+    model: &str,
+    output_schema: &str,
+    working_dir: Option<&std::path::Path>,
+    reasoning_effort: Option<&str>,
+    sandbox: &str,
+) -> Result<String, String> {
     let cli_path = crate::codex_cli::resolve_cli_binary(app)?;
 
     if !crate::platform::resolved_cli_exists(&cli_path) {
@@ -5009,12 +5052,13 @@ pub fn execute_one_shot_codex(
     });
 
     let mut cmd = crate::platform::resolved_cli_command(&cli_path, working_dir);
-    cmd.args(build_one_shot_codex_args(
+    cmd.args(build_one_shot_codex_args_with_sandbox(
         actual_model,
         is_fast,
         &schema_arg,
         working_dir_arg.as_deref(),
         None, // one-shot callers can opt into custom providers later via prefs
+        sandbox,
     ));
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -5210,13 +5254,31 @@ fn build_one_shot_codex_args(
     working_dir: Option<&std::path::Path>,
     codex_provider: Option<&crate::CodexProviderProfile>,
 ) -> Vec<std::ffi::OsString> {
+    build_one_shot_codex_args_with_sandbox(
+        actual_model,
+        is_fast,
+        schema_file,
+        working_dir,
+        codex_provider,
+        "workspace-write",
+    )
+}
+
+fn build_one_shot_codex_args_with_sandbox(
+    actual_model: &str,
+    is_fast: bool,
+    schema_file: &std::path::Path,
+    working_dir: Option<&std::path::Path>,
+    codex_provider: Option<&crate::CodexProviderProfile>,
+    sandbox: &str,
+) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         "exec".into(),
         "--json".into(),
         "--model".into(),
         actual_model.into(),
         "--sandbox".into(),
-        "workspace-write".into(),
+        sandbox.into(),
         "--output-schema".into(),
         schema_file.as_os_str().to_os_string(),
         "-c".into(),
@@ -5744,6 +5806,27 @@ mod tests {
             Some(&schema_file.as_os_str().to_os_string()),
             "schema path must immediately follow --output-schema"
         );
+    }
+
+    #[test]
+    fn director_codex_args_use_read_only_sandbox() {
+        let schema_file = std::path::Path::new("/tmp/jean-codex-schema.json");
+        let args = build_one_shot_codex_args_with_sandbox(
+            "gpt-5.4-mini",
+            false,
+            schema_file,
+            None,
+            None,
+            "read-only",
+        );
+
+        assert!(args.windows(2).any(|window| {
+            window
+                == [
+                    std::ffi::OsString::from("--sandbox"),
+                    std::ffi::OsString::from("read-only"),
+                ]
+        }));
     }
 
     #[test]

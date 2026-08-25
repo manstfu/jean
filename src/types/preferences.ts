@@ -1278,6 +1278,16 @@ export interface AppPreferences {
   confirm_session_close: boolean // Show confirmation dialog before closing sessions/worktrees
   default_execution_mode: ExecutionMode // Default execution mode for new sessions: 'plan', 'build', or 'yolo'
   default_backend: CliBackend // Default CLI backend for new sessions
+  /** Legacy fallback for missions created without per-session robot settings. */
+  autopilot_director_backend?: CliBackend
+  /** Legacy fallback for missions created without per-session robot settings. */
+  autopilot_director_model?: string
+  /** Legacy fallback provider/profile for older missions. */
+  autopilot_director_provider?: string | null
+  /** Legacy fallback reasoning/effort for older missions. */
+  autopilot_director_effort?: EffortLevel | null
+  /** Legacy per-backend Worker defaults; new missions inherit the open session. */
+  autopilot_worker_models?: Partial<Record<CliBackend, string>>
   default_new_session_kind: NewSessionKind // Default action for CMD+T: 'chat', 'terminal', or a CLI backend
   selected_codex_model: CodexModel // Default Codex model
   selected_opencode_model: string // Default OpenCode model (provider/model)
@@ -2067,7 +2077,7 @@ export const openInDefaultOptions: { value: OpenInDefault; label: string }[] = [
   { value: 'github', label: 'GitHub' },
 ]
 
-export type NewSessionKind = 'chat' | 'terminal' | CliBackend
+export type NewSessionKind = 'chat' | 'terminal' | 'autopilot' | CliBackend
 
 export const newSessionKindOptions: {
   value: NewSessionKind
@@ -2404,6 +2414,20 @@ export const defaultPreferences: AppPreferences = {
   confirm_session_close: true, // Default: enabled (show confirmation)
   default_execution_mode: 'plan', // Default: plan mode
   default_backend: 'claude', // Default: Claude
+  autopilot_director_backend: 'codex', // Default hidden Director backend
+  autopilot_director_model: 'gpt-5.4-mini', // Prefer a fast model when available
+  autopilot_director_provider: null,
+  autopilot_director_effort: 'low',
+  autopilot_worker_models: {
+    claude: 'haiku',
+    codex: 'gpt-5.4-mini',
+    opencode: 'opencode/gpt-5.6-sol',
+    cursor: 'cursor/auto',
+    pi: 'pi/sonnet',
+    commandcode: 'commandcode/default',
+    grok: 'grok/grok-4.5',
+    kimi: 'kimi/default',
+  },
   default_new_session_kind: 'chat', // Default: Jean Chat for CMD+T
   selected_codex_model: 'gpt-5.6-sol', // Default: latest Codex model
   selected_opencode_model: 'opencode/gpt-5.6-sol', // Default OpenCode model

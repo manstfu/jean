@@ -130,6 +130,7 @@ import { ChatToolbar } from './ChatToolbar'
 import { SendCancelButton } from './toolbar/SendCancelButton'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
 import { ReviewMethodModal } from './ReviewMethodModal'
+import { AutopilotMissionBanner } from '@/components/autopilot/AutopilotMissionBanner'
 import { QueuedPromptsPanel } from './QueuedPromptsPanel'
 import { useQueuedPromptActions } from './hooks/useQueuedPromptActions'
 import { FloatingButtons } from './FloatingButtons'
@@ -2971,7 +2972,7 @@ export function ChatWindow({
     >
       <div
         data-chat-session-id={activeSessionId}
-        className="flex h-full w-full min-w-0 flex-col overflow-hidden"
+        className="relative flex h-full w-full min-w-0 flex-col overflow-hidden"
       >
         <ReviewMethodModal
           open={reviewMethodModalOpen}
@@ -2981,6 +2982,25 @@ export function ChatWindow({
           onCodeRabbitPrReview={handleCodeRabbitPrReview}
           codeRabbitPrAvailable={Boolean(worktree?.pr_number)}
         />
+        {activeWorktreeId && activeSessionId && activeWorktreePath && (
+          <AutopilotMissionBanner
+            key={`${activeSessionId}:${primarySurface}`}
+            projectId={worktree?.project_id ?? null}
+            worktreeId={activeWorktreeId}
+            worktreePath={activeWorktreePath}
+            sessionId={activeSessionId}
+            workerBackend={selectedBackend}
+            workerModel={selectedModel}
+            workerProvider={selectedProvider ?? null}
+            primarySurface={
+              primarySurface === 'terminal' ||
+              session?.primary_surface === 'terminal'
+                ? 'terminal'
+                : 'chat'
+            }
+            terminalId={sessionTerminalId}
+          />
+        )}
         {isTerminalPrimarySurface ? (
           <FullScreenTerminalSurface
             worktreeId={activeWorktreeId}

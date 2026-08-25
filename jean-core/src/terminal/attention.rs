@@ -1,7 +1,8 @@
-//! Lifecycle signals for Codex sessions running in Jean's native terminal.
+//! Lifecycle signals for supported AI sessions running in Jean's native terminal.
 
 use once_cell::sync::Lazy;
 use serde::Deserialize;
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -25,10 +26,23 @@ struct CodexNotification {
     input_messages: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeNotification {
+    hook_event_name: String,
+    #[serde(default)]
+    last_assistant_message: Option<String>,
+}
+
 #[derive(Debug, PartialEq)]
 struct ParsedNotification {
     thread_id: Option<String>,
     first_prompt: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ParsedClaudeNotification {
+    event_name: String,
+    last_assistant_message: Option<String>,
 }
 
 fn signal_file(app: &AppHandle, session_id: &str) -> Result<PathBuf, String> {
@@ -43,11 +57,29 @@ fn signal_file(app: &AppHandle, session_id: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{safe_session_id}.jsonl")))
 }
 
+fn command_name(command: &str) -> Option<String> {
+    command
+        .rsplit(['/', '\\'])
+        .next()
+        .map(str::to_ascii_lowercase)
+}
+
 pub fn is_codex_command(command: &str) -> bool {
-    Path::new(command)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "codex" || name == "codex.exe")
+    command_name(command).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "codex" | "codex.exe" | "codex.cmd" | "codex.bat"
+        )
+    })
+}
+
+pub fn is_claude_command(command: &str) -> bool {
+    command_name(command).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "claude" | "claude.exe" | "claude.cmd" | "claude.bat"
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -102,6 +134,95 @@ pub fn inject_codex_notify(
     (codex_notify_args(&path, args), Some(path))
 }
 
+fn claude_hook_path(signal_path: &Path) -> String {
+    let path = signal_path.to_string_lossy();
+    if cfg!(windows) && crate::platform::get_wsl_config().enabled {
+        crate::platform::win_to_wsl_path(&path)
+    } else {
+        path.into_owned()
+    }
+}
+
+fn posix_shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn claude_stop_hook_command(signal_path: &Path) -> String {
+    let path = claude_hook_path(signal_path);
+    if !cfg!(windows) || crate::platform::get_wsl_config().enabled {
+        let path = posix_shell_escape(&path);
+        format!("payload=$(cat); printf '%s\\n' \"$payload\" >> {path}")
+    } else {
+        let path = path.replace('\'', "''");
+        format!(
+            "powershell.exe -NoProfile -Command \"$payload = [Console]::In.ReadToEnd(); Add-Content -LiteralPath '{path}' -Value $payload\""
+        )
+    }
+}
+
+fn claude_hook_settings(signal_path: &Path) -> String {
+    let command = claude_stop_hook_command(signal_path);
+    json!({
+        "hooks": {
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": command.clone(),
+                }]
+            }],
+            "StopFailure": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": command,
+                }]
+            }]
+        }
+    })
+    .to_string()
+}
+
+pub fn inject_claude_hooks(
+    app: &AppHandle,
+    session_id: &str,
+    command: &str,
+    args: Vec<String>,
+) -> (Vec<String>, Option<PathBuf>) {
+    if !is_claude_command(command) {
+        return (args, None);
+    }
+    let path = match signal_file(app, session_id) {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("terminal notifications: {error}");
+            return (args, None);
+        }
+    };
+    if let Err(error) = std::fs::write(&path, b"") {
+        log::warn!("terminal notifications: cannot reset signal file: {error}");
+        return (args, None);
+    }
+
+    let mut args = args;
+    args.push("--settings".to_string());
+    args.push(claude_hook_settings(&path));
+    (args, Some(path))
+}
+
+pub fn inject_lifecycle_notifications(
+    app: &AppHandle,
+    session_id: &str,
+    command: &str,
+    args: Vec<String>,
+) -> (Vec<String>, Option<PathBuf>) {
+    if is_codex_command(command) {
+        return inject_codex_notify(app, session_id, command, args);
+    }
+    if is_claude_command(command) {
+        return inject_claude_hooks(app, session_id, command, args);
+    }
+    (args, None)
+}
+
 fn parse_codex_notification(line: &str) -> Option<ParsedNotification> {
     let notification: CodexNotification = serde_json::from_str(line).ok()?;
     if notification.event_type != "agent-turn-complete" {
@@ -114,6 +235,20 @@ fn parse_codex_notification(line: &str) -> Option<ParsedNotification> {
     Some(ParsedNotification {
         thread_id: notification.thread_id,
         first_prompt,
+    })
+}
+
+fn parse_claude_notification(line: &str) -> Option<ParsedClaudeNotification> {
+    let notification: ClaudeNotification = serde_json::from_str(line).ok()?;
+    if !matches!(
+        notification.hook_event_name.as_str(),
+        "Stop" | "StopFailure"
+    ) {
+        return None;
+    }
+    Some(ParsedClaudeNotification {
+        event_name: notification.hook_event_name,
+        last_assistant_message: notification.last_assistant_message,
     })
 }
 
@@ -161,23 +296,37 @@ pub fn spawn_signal_tailer(
         };
         let mut naming_attempted = false;
         let mut handle_line = |line: &str| {
-            let Some(notification) = parse_codex_notification(line.trim()) else {
+            if let Some(notification) = parse_codex_notification(line.trim()) {
+                set_waiting(&app, &session_id, true, notification.thread_id.as_deref());
+                if !naming_attempted {
+                    if let Some(prompt) = notification.first_prompt {
+                        naming_attempted = true;
+                        let app = app.clone();
+                        let session_id = session_id.clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::chat::trigger_terminal_session_naming(app, session_id, prompt)
+                                .await;
+                        });
+                    }
+                }
+                let _ = app.emit_all(
+                    "terminal:attention",
+                    &serde_json::json!({ "sessionId": session_id, "succeeded": true }),
+                );
+                return;
+            }
+
+            let Some(notification) = parse_claude_notification(line.trim()) else {
                 return;
             };
-            set_waiting(&app, &session_id, true, notification.thread_id.as_deref());
-            if !naming_attempted {
-                if let Some(prompt) = notification.first_prompt {
-                    naming_attempted = true;
-                    let app = app.clone();
-                    let session_id = session_id.clone();
-                    tauri::async_runtime::spawn(async move {
-                        crate::chat::trigger_terminal_session_naming(app, session_id, prompt).await;
-                    });
-                }
-            }
+            set_waiting(&app, &session_id, true, None);
             let _ = app.emit_all(
                 "terminal:attention",
-                &serde_json::json!({ "sessionId": session_id }),
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "succeeded": notification.event_name == "Stop",
+                    "summary": notification.last_assistant_message,
+                }),
             );
         };
         loop {
@@ -234,6 +383,14 @@ mod tests {
     }
 
     #[test]
+    fn detects_claude_command_by_name_and_path() {
+        assert!(is_claude_command("claude"));
+        assert!(is_claude_command(r"C:\Users\Jean\claude.cmd"));
+        assert!(!is_claude_command("codex"));
+        assert!(!is_claude_command(""));
+    }
+
+    #[test]
     fn terminal_signal_filename_cannot_escape_notification_directory() {
         let safe_session_id = crate::chat::storage::sanitize_filename("../../session/1");
 
@@ -265,6 +422,45 @@ mod tests {
             payload.first_prompt.as_deref(),
             Some("Fix the terminal state")
         );
+    }
+
+    #[test]
+    fn parses_claude_stop_hook_payload() {
+        let payload = parse_claude_notification(
+            r#"{"hook_event_name":"Stop","last_assistant_message":"Done"}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.event_name, "Stop");
+        assert_eq!(payload.last_assistant_message.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn parses_claude_stop_failure_hook_payload() {
+        let payload = parse_claude_notification(
+            r#"{"hook_event_name":"StopFailure","last_assistant_message":"Rate limited"}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.event_name, "StopFailure");
+    }
+
+    #[test]
+    fn ignores_non_stop_claude_hook_payloads() {
+        assert!(parse_claude_notification(r#"{"hook_event_name":"PostToolUse"}"#).is_none());
+    }
+
+    #[test]
+    fn claude_hook_settings_register_stop_and_failure_signals() {
+        let settings = claude_hook_settings(Path::new(r"C:\Jean\terminal.jsonl"));
+        let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        assert_eq!(value["hooks"]["Stop"][0]["hooks"][0]["type"], "command");
+        assert_eq!(
+            value["hooks"]["StopFailure"][0]["hooks"][0]["type"],
+            "command"
+        );
+        assert!(value["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("terminal.jsonl"));
     }
 
     #[test]

@@ -379,7 +379,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     | null
   >(null)
   const [isDeletingCli, setIsDeletingCli] = useState(false)
-
   const customCliProfiles = useMemo(
     () => preferences?.custom_cli_profiles ?? [],
     [preferences?.custom_cli_profiles]
